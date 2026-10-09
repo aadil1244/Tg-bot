@@ -1,0 +1,224 @@
+"command","help","aliases","answer","keyboard","scenarios","need_reply","group"
+"/start","Main menu","🏠 Menu","👋 *Welcome to SMM Panel Bot*
+
+Social media services — followers, likes, views & more.
+No login needed, your Telegram account is your wallet.","🛒 New Order, 💰 Balance
+➕ Add Funds, 📦 My Orders
+🆘 Support","","",""
+"/balance","Wallet balance","💰 Balance","","","
+var bal = Libs.ResourcesLib.userRes(""balance"");
+Bot.sendMessage(""💰 *Wallet Balance:* ₹"" + Number(bal.value()).toFixed(2));
+","",""
+"/sync","Admin: refresh services","","","","
+var admins = String(Bot.getProperty(""ADMIN_IDS"")||"""").split("","");
+if (admins.indexOf(String(user.telegramid)) < 0) { return Bot.sendMessage(""⛔ Admin only.""); }
+Bot.sendMessage(""⏳ Syncing services from provider..."");
+HTTP.post({
+  url: Bot.getProperty(""SMM_API_URL"") || ""https://smpanel.in/api/v2"",
+  body: { key: Bot.getProperty(""SMM_API_KEY""), action: ""services"" },
+  success: ""/onSync"", error: ""/onApiError""
+});
+","",""
+"/onSync","","","","","
+var list;
+try { list = JSON.parse(content); } catch(e) { return Bot.sendMessage(""❌ Provider reply not understood.""); }
+if (!Array.isArray(list)) { return Bot.sendMessage(""❌ Provider error: "" + (list.error||""unknown"")); }
+var margin = parseFloat(Bot.getProperty(""MARGIN_PERCENT"")||""100"");
+var fx = parseFloat(Bot.getProperty(""FX_RATE"")||""1"");
+var filt = String(Bot.getProperty(""CATEGORY_FILTER"")||"""").toLowerCase().split("","").map(function(x){return x.trim();}).filter(Boolean);
+var maxSvc = parseInt(Bot.getProperty(""MAX_SERVICES"")||""400"");
+var cats = [], svcs = [];
+for (var i=0;i<list.length && svcs.length<maxSvc;i++){
+  var s = list[i];
+  var cn = String(s.category||""Other"");
+  if (filt.length){ var ok=false; for (var j=0;j<filt.length;j++){ if (cn.toLowerCase().indexOf(filt[j])>=0) ok=true; } if(!ok) continue; }
+  var ci = cats.indexOf(cn); if (ci<0){ cats.push(cn); ci = cats.length-1; }
+  var price = parseFloat(s.rate)*fx*(1+margin/100);
+  svcs.push([String(s.service), String(s.name).substr(0,70), ci, Math.round(price*10000)/10000, parseInt(s.min), parseInt(s.max)]);
+}
+Bot.setProperty(""CATALOG"", {cats:cats, svcs:svcs, at:Date.now()}, ""json"");
+Bot.sendMessage(""✅ Synced "" + svcs.length + "" services in "" + cats.length + "" categories."");
+","",""
+"/onApiError","","","","","
+Bot.sendMessage(""⚠️ Provider is not responding right now. Please try again in a moment."");
+","",""
+"/neworder","Start a new order","🛒 New Order","","","
+var cat = Bot.getProperty(""CATALOG"");
+if (!cat || !cat.cats || !cat.cats.length) { return Bot.sendMessage(""Services are being updated. Please try again shortly.""); }
+User.setProperty(""page"", 0, ""integer"");
+Bot.runCommand(""/showcats"");
+","",""
+"/showcats","","","","","
+var cat = Bot.getProperty(""CATALOG"");
+var page = parseInt(User.getProperty(""page"")||0), per = 8;
+var rows = [];
+var start = page*per, end = Math.min(cat.cats.length, start+per);
+for (var i=start;i<end;i++){ rows.push([{text: cat.cats[i].substr(0,50), callback_data: ""/showsvcs "" + i + "" 0""}]); }
+var nav = [];
+if (page>0) nav.push({text:""⬅️ Prev"", callback_data:""/catpage "" + (page-1)});
+if (end<cat.cats.length) nav.push({text:""Next ➡️"", callback_data:""/catpage "" + (page+1)});
+if (nav.length) rows.push(nav);
+Api.sendMessage({ text: ""📂 *Choose a category* ("" + (page+1) + ""/"" + Math.ceil(cat.cats.length/per) + "")"", parse_mode:""Markdown"", reply_markup:{inline_keyboard: rows} });
+","",""
+"/catpage","","","","","
+User.setProperty(""page"", parseInt(params), ""integer"");
+Bot.runCommand(""/showcats"");
+","",""
+"/showsvcs","","","","","
+var p = params.split("" ""); var ci = parseInt(p[0]), page = parseInt(p[1]||0), per = 8;
+var cat = Bot.getProperty(""CATALOG"");
+var list = cat.svcs.filter(function(s){ return s[2]===ci; });
+var start = page*per, end = Math.min(list.length, start+per);
+var rows = [];
+for (var i=start;i<end;i++){
+  var s = list[i];
+  rows.push([{text: ""₹"" + (s[3]).toFixed(2) + ""/1K · "" + s[1].substr(0,38), callback_data: ""/pick "" + s[0]}]);
+}
+var nav = [];
+if (page>0) nav.push({text:""⬅️ Prev"", callback_data:""/showsvcs "" + ci + "" "" + (page-1)});
+if (end<list.length) nav.push({text:""Next ➡️"", callback_data:""/showsvcs "" + ci + "" "" + (page+1)});
+if (nav.length) rows.push(nav);
+rows.push([{text:""🔙 Categories"", callback_data:""/showcats""}]);
+Api.sendMessage({ text: ""📦 *"" + cat.cats[ci] + ""*\nChoose a service:"", parse_mode:""Markdown"", reply_markup:{inline_keyboard: rows} });
+","",""
+"/confirm","","","","","
+var o = User.getProperty(""order"");
+if (!o || !o.qty) { return Bot.sendMessage(""Nothing to confirm. Start a /neworder.""); }
+var bal = Libs.ResourcesLib.userRes(""balance"");
+if (bal.value() < o.charge) { return Bot.sendMessage(""❌ Not enough balance. Need ₹"" + o.charge.toFixed(2) + "". Use ➕ Add Funds.""); }
+bal.remove(o.charge);               // charge first, refund if provider refuses
+User.setProperty(""pending"", o, ""json"");
+User.setProperty(""order"", null, ""json"");
+HTTP.post({
+  url: Bot.getProperty(""SMM_API_URL"") || ""https://smpanel.in/api/v2"",
+  body: { key: Bot.getProperty(""SMM_API_KEY""), action: ""add"", service: o.sid, link: o.link, quantity: o.qty },
+  success: ""/onOrderOk"", error: ""/onOrderFail""
+});
+Bot.sendMessage(""⏳ Placing your order..."");
+","",""
+"/onOrderOk","","","","","
+var o = User.getProperty(""pending"");
+var r; try { r = JSON.parse(content); } catch(e) { r = {}; }
+var bal = Libs.ResourcesLib.userRes(""balance"");
+if (!r.order) {
+  if (o) bal.add(o.charge);
+  User.setProperty(""pending"", null, ""json"");
+  return Bot.sendMessage(""❌ Provider rejected the order"" + (r.error ? ("": "" + r.error) : """") + "".\n💸 ₹"" + (o?o.charge.toFixed(2):""0"") + "" refunded."");
+}
+var list = User.getProperty(""orders"") || [];
+list.unshift({id:String(r.order), name:o.name, qty:o.qty, charge:o.charge, link:o.link, t:Date.now()});
+User.setProperty(""orders"", list.slice(0,20), ""json"");
+User.setProperty(""pending"", null, ""json"");
+Bot.sendMessage(""✅✅ *Order placed!*\n\n🆔 Order ID: `"" + r.order + ""`\n💵 Charged: ₹"" + o.charge.toFixed(2) + ""\n💰 Balance: ₹"" + Number(bal.value()).toFixed(2) + ""\n\nCheck progress in 📦 My Orders."");
+","",""
+"/onOrderFail","","","","","
+// Network error: we cannot know if provider got the order, so do NOT auto-refund. Ask admin to verify.
+var o = User.getProperty(""pending"");
+Bot.sendMessage(""⚠️ Network problem while placing the order. Your payment is on hold — support will verify and refund if it was not placed."");
+var admins = String(Bot.getProperty(""ADMIN_IDS"")||"""").split("","");
+for (var i=0;i<admins.length;i++){ if(admins[i]) Api.sendMessage({chat_id:admins[i], text:""⚠️ Unknown order result. User "" + user.telegramid + "" charged ₹"" + (o?o.charge:""?"") + "" for "" + (o?o.name:""?"") + "" / "" + (o?o.link:"""") + "". Check provider, then /addbal "" + user.telegramid + "" amount if refund needed.""}); }
+","",""
+"/orders","My orders","📦 My Orders","","","
+var list = User.getProperty(""orders"") || [];
+if (!list.length) { return Bot.sendMessage(""No orders yet. Tap 🛒 New Order.""); }
+var rows = [];
+for (var i=0;i<Math.min(8,list.length);i++){ rows.push([{text:""#"" + list[i].id + "" · "" + list[i].name.substr(0,30), callback_data:""/status "" + list[i].id}]); }
+Api.sendMessage({ text:""📦 *Your recent orders* — tap one for live status"", parse_mode:""Markdown"", reply_markup:{inline_keyboard: rows} });
+","",""
+"/status","","","","","
+HTTP.post({
+  url: Bot.getProperty(""SMM_API_URL"") || ""https://smpanel.in/api/v2"",
+  body: { key: Bot.getProperty(""SMM_API_KEY""), action: ""status"", order: String(params).trim() },
+  success: ""/onStatus"", error: ""/onApiError""
+});
+","",""
+"/onStatus","","","","","
+var r; try { r = JSON.parse(content); } catch(e) { return Bot.sendMessage(""❌ Could not read status.""); }
+if (r.error) { return Bot.sendMessage(""❌ "" + r.error); }
+var em = {""Completed"":""✅"",""In progress"":""🔄"",""Processing"":""⏳"",""Pending"":""⏳"",""Partial"":""🟡"",""Canceled"":""❌""};
+Bot.sendMessage(""📊 *Order Status*\n\n"" + (em[r.status]||""ℹ️"") + "" Status: *"" + r.status + ""*\n▶️ Start count: "" + (r.start_count||""-"") + ""\n🔻 Remains: "" + (r.remains||""-""));
+","",""
+"/addfunds","Add money","➕ Add Funds","","","
+var upi = Bot.getProperty(""UPI_ID"") || ""(admin has not set UPI_ID)"";
+Bot.sendMessage(""➕ *Add Funds (UPI)*\n\n1️⃣ Pay to UPI ID:\n`"" + upi + ""`\n2️⃣ Copy the *UTR / Reference ID* from your payment app.\n3️⃣ Send amount like this:\n\n`/paid 100 123456789012`\n\n(amount then UTR). Balance is added after admin verifies your payment."");
+","",""
+"/paid","","","","","
+var p = String(params||"""").trim().split(/\s+/);
+var amt = parseFloat(p[0]), utr = String(p[1]||"""").toUpperCase();
+if (isNaN(amt) || amt < 10 || !/^[A-Z0-9]{6,35}$/.test(utr)) { return Bot.sendMessage(""❌ Format: `/paid 100 123456789012` (min ₹10)""); }
+var used = Bot.getProperty(""UTRS"") || {};
+if (used[utr]) { return Bot.sendMessage(""❌ This UTR was already submitted.""); }
+used[utr] = user.telegramid; Bot.setProperty(""UTRS"", used, ""json"");
+Bot.sendMessage(""📨 Payment submitted for review.\nAmount: ₹"" + amt.toFixed(2) + ""\nUTR: "" + utr + ""\nYou will be notified once approved."");
+var admins = String(Bot.getProperty(""ADMIN_IDS"")||"""").split("","");
+for (var i=0;i<admins.length;i++){ if(admins[i]) Api.sendMessage({chat_id:admins[i], text:""💳 New payment\nUser: "" + user.telegramid + "" ("" + (user.first_name||"""") + "")\nAmount: ₹"" + amt + ""\nUTR: "" + utr + ""\n\nApprove: /approve "" + user.telegramid + "" "" + amt + "" "" + utr}); }
+","",""
+"/approve","Admin: approve payment","","","","
+var admins = String(Bot.getProperty(""ADMIN_IDS"")||"""").split("","");
+if (admins.indexOf(String(user.telegramid)) < 0) { return Bot.sendMessage(""⛔ Admin only.""); }
+var p = String(params||"""").trim().split(/\s+/);
+var uid = p[0], amt = parseFloat(p[1]), utr = p[2]||"""";
+if (!uid || isNaN(amt) || amt<=0) { return Bot.sendMessage(""Usage: /approve <telegram_id> <amount> <utr>""); }
+var done = Bot.getProperty(""APPROVED"") || {};
+if (utr && done[utr]) { return Bot.sendMessage(""⚠️ Already approved.""); }
+if (utr) { done[utr] = 1; Bot.setProperty(""APPROVED"", done, ""json""); }
+Libs.ResourcesLib.anotherUserRes(""balance"", uid).add(amt);
+Bot.sendMessage(""✅ Added ₹"" + amt + "" to "" + uid);
+Api.sendMessage({chat_id: uid, text: ""✅ Payment approved! ₹"" + amt.toFixed(2) + "" added to your wallet.""});
+","",""
+"/addbal","Admin: add/remove balance","","","","
+var admins = String(Bot.getProperty(""ADMIN_IDS"")||"""").split("","");
+if (admins.indexOf(String(user.telegramid)) < 0) { return Bot.sendMessage(""⛔ Admin only.""); }
+var p = String(params||"""").trim().split(/\s+/);
+var uid = p[0], amt = parseFloat(p[1]);
+if (!uid || isNaN(amt)) { return Bot.sendMessage(""Usage: /addbal <telegram_id> <amount>""); }
+var r = Libs.ResourcesLib.anotherUserRes(""balance"", uid);
+if (amt >= 0) r.add(amt); else r.remove(-amt);
+Bot.sendMessage(""✅ Done. New balance of "" + uid + "": ₹"" + Number(r.value()).toFixed(2));
+","",""
+"/support","Contact support","🆘 Support","","","
+Bot.sendMessage(""🆘 *Support*\n\nContact: "" + (Bot.getProperty(""SUPPORT_CONTACT"") || ""@your_support_username"") + ""\nShare your Order ID for faster help."");
+","",""
+"/help","Help","","*Commands*
+/start – menu
+/neworder – place order
+/balance – wallet
+/addfunds – add money
+/orders – my orders
+/support – help","","","",""
+"/pick","","","","","
+var cat = Bot.getProperty(""CATALOG""), sid = String(params).trim(), s = null;
+for (var i=0;i<cat.svcs.length;i++){ if (cat.svcs[i][0]===sid) s = cat.svcs[i]; }
+if (!s) { return Bot.sendMessage(""Service not found. Please start again.""); }
+User.setProperty(""order"", {sid:s[0], name:s[1], price:s[3], min:s[4], max:s[5]}, ""json"");
+User.setProperty(""step"", ""link"", ""string"");
+Bot.sendMessage(""✅ *"" + s[1] + ""*\n💵 ₹"" + s[3].toFixed(2) + "" per 1000\n📉 Min: "" + s[4] + "" | 📈 Max: "" + s[5] + ""\n\n🔗 Now send the *link* (https://...)\nor /cancel"");
+","",""
+"/cancel","Cancel current action","","","","
+User.setProperty(""order"", null, ""json"");
+User.setProperty(""step"", """", ""string"");
+Bot.sendMessage(""❌ Cancelled."");
+","",""
+"*","","","","","
+var step = User.getProperty(""step"");
+var o = User.getProperty(""order"");
+if (!step || !o) { return Bot.sendMessage(""Tap /start to open the menu.""); }
+var text = String(message||"""").trim();
+if (step === ""link"") {
+  if (!/^https?:\/\/\S+$/i.test(text)) { return Bot.sendMessage(""❌ Please send a valid link starting with https://""); }
+  o.link = text; User.setProperty(""order"", o, ""json"");
+  User.setProperty(""step"", ""qty"", ""string"");
+  return Bot.sendMessage(""🔢 Send *quantity* ("" + o.min + "" – "" + o.max + "")"");
+}
+if (step === ""qty"") {
+  var q = parseInt(text);
+  if (isNaN(q) || q < o.min || q > o.max) { return Bot.sendMessage(""❌ Quantity must be between "" + o.min + "" and "" + o.max + "".""); }
+  o.qty = q; o.charge = Math.round(o.price*q/1000*100)/100;
+  User.setProperty(""order"", o, ""json"");
+  User.setProperty(""step"", """", ""string"");
+  var bal = Libs.ResourcesLib.userRes(""balance"");
+  var txt = ""🧾 *Order Summary*\n\n📦 "" + o.name + ""\n🔗 "" + o.link + ""\n🔢 Qty: "" + q + ""\n💵 Charge: *₹"" + o.charge.toFixed(2) + ""*\n💰 Balance: ₹"" + Number(bal.value()).toFixed(2);
+  Api.sendMessage({ text: txt, parse_mode:""Markdown"", disable_web_page_preview:true,
+    reply_markup:{inline_keyboard:[[{text:""✅ Confirm"", callback_data:""/confirm""},{text:""❌ Cancel"", callback_data:""/cancel""}]]} });
+}
+","",""
